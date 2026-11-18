@@ -1,0 +1,1 @@
+{ "name": "code-hud", "version": "0.1.0", "description": "A status band, detail panel and animated mascot for the Claude desktop Code tab.", "types": "./types/index.d.ts" }

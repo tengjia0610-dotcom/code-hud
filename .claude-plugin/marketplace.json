@@ -1,0 +1,5 @@
+{
+  "name": "code-hud",
+  "owner": { "name": "tengjia0610-dotcom" },
+  "plugins": [{ "name": "code-hud", "source": "./" }]
+}
