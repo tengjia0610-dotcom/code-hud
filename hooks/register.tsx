@@ -5,9 +5,10 @@ import { collectDynamic, collectHooks, collectSession, readHookCommand } from '.
 import { openInObsidian, openObsidian, openWarp, type LaunchResult } from './launch'
 import { nextMascot, pose, SLEEP_MS, type MascotEvent } from './mascot'
 import { Pane } from './pane'
+import { collectSettings, fileKind, viewKind } from './settings'
 import {
   changeMascot, dropUsageReset, mergeDynamic, openFile, refreshFile, readCounts, readDynamic, readHooks, readMascot, readMemory, readMode,
-  readServers, readUi, setConfirmedMode, setDefaultMode, setHooks, setMemory, setServerId, setServers, setView,
+  readServers, readSettings, readUi, setConfirmedMode, setDefaultMode, setHooks, setMemory, setServerId, setServers, setSettings, setView,
   toggleGroup, toggleHook,
 } from './state'
 
@@ -71,6 +72,7 @@ function start($: EngineInterface): void {
   background($, refreshDynamic($))
   background($, refreshSession($))
   background($, refreshHooks($))
+  background($, refreshSettings($))
 }
 
 // ---- collection ----
@@ -93,6 +95,23 @@ async function refreshSession($: EngineInterface): Promise<void> {
 
 async function refreshHooks($: EngineInterface): Promise<void> {
   await setHooks($, await collectHooks($, await readHooks($)))
+}
+
+// Numbers each settings collection: only the latest may write, so an older, slower one never lands over a newer one.
+let settingsRun = 0
+
+async function refreshSettings($: EngineInterface): Promise<void> {
+  const run = ++settingsRun
+  const found = await collectSettings($)
+  if (run !== settingsRun) return
+  if (found !== undefined) await setSettings($, found)   // a failed check keeps what is stored
+}
+
+/** Collects again what a view shows. */
+async function refreshFor($: EngineInterface, view: View): Promise<void> {
+  if (view === 'hooks') await refreshHooks($)
+  else if (view === 'settings') await refreshSettings($)
+  else await refreshSession($)
 }
 
 function armReset($: EngineInterface, at: string | undefined, now: number): void {
@@ -180,7 +199,7 @@ async function pressView($: EngineInterface, view: View): Promise<void> {
     }
     await setView($, view)
     await $.ui.open({ id: PANE_ID, title: 'Code HUD' })
-    background($, view === 'hooks' ? refreshHooks($) : refreshSession($))
+    background($, refreshFor($, view))
   } catch (error) {
     log($, error)
   }
@@ -209,7 +228,7 @@ async function pressObsidian($: EngineInterface): Promise<void> {
 async function pressTab($: EngineInterface, view: View): Promise<void> {
   try {
     await setView($, view)
-    await (view === 'hooks' ? refreshHooks($) : refreshSession($))
+    await refreshFor($, view)
   } catch (error) {
     log($, error)
   }
@@ -236,9 +255,21 @@ async function pressFileObsidian($: EngineInterface): Promise<void> {
   }
 }
 
-async function pressObsidianFile($: EngineInterface, index: number): Promise<void> {
+/** A settings file in Warp; `path` undefined is the file the file view shows. Only a listed file opens. */
+async function pressWarpFile($: EngineInterface, row?: string): Promise<void> {
   try {
-    const file = (await readMemory($))[index]
+    const [files, ui] = await Promise.all([readSettings($), readUi($)])
+    const path = row ?? ui.filePath
+    if (path === undefined || !files.some(f => f.path === path)) $.ui.toast('读不到这个文件')
+    else await pressLaunch($, () => openWarp($, path))
+  } catch (error) {
+    log($, error)
+  }
+}
+
+async function pressObsidianFile($: EngineInterface, path: string): Promise<void> {
+  try {
+    const file = (await readMemory($)).find(f => f.path === path)
     if (file !== undefined) await pressLaunch($, () => openInObsidian($, file.path, file.type))
   } catch (error) {
     log($, error)
@@ -260,6 +291,7 @@ async function onTurnEnd($: EngineInterface, isAnswer: boolean): Promise<void> {
   if (!wasStarted) return // start() has just collected every tier
   background($, refreshDynamic($))
   background($, refreshSession($))
+  background($, refreshSettings($))
 }
 
 export const register: Register = on => {
@@ -323,6 +355,12 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A new working directory is a new project: its settings files are listed without waiting for the turn's end.
+  on('classic.CwdChanged', ($, e, next) => {
+    if (isStarted && e.agent_id === undefined) background($, refreshSettings($))
+    return next(e)
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.surface !== 'desktop') return next(e)
     latchFromRender($)
@@ -350,18 +388,18 @@ export const register: Register = on => {
     latchFromRender($)
     // A failed read or build must not break the session: log it and leave the pane to the engine.
     try {
-      const [dynamic, memory, servers, hooks, ui, now, home, cwd] = await Promise.all([
-        readDynamic($), readMemory($), readServers($), readHooks($), readUi($), $.clock.now(), $.env.get('HOME'), $.session.root(),
+      const [dynamic, memory, servers, hooks, settings, ui, now, home, cwd] = await Promise.all([
+        readDynamic($), readMemory($), readServers($), readHooks($), readSettings($), readUi($), $.clock.now(), $.env.get('HOME'), $.session.root(),
       ])
       // The command is read while drawing and handed to the tree only: never stored.
       const openHook = ui.openHook
       const group = openHook === undefined || !ui.openGroups.includes(openHook.group) ? undefined : hooks.find(g => g.id === openHook.group)
-      // The file's text is read while drawing and handed to the tree only: never stored. Only a file the session loaded.
+      // The file's text is read while drawing and handed to the tree only: never stored. Only a listed file.
       let fileText: string | undefined
       let fileError: string | undefined
       if (ui.view === 'file' && e.props.placement !== 'widget') {   // a widget draws no file
         try {
-          if (ui.filePath === undefined || !memory.some(f => f.path === ui.filePath)) throw new Error('not a loaded CLAUDE.md')
+          if (ui.filePath === undefined || fileKind(ui.filePath, memory, settings) === undefined) throw new Error('not a listed file')
           fileText = await $.fs.read(ui.filePath)
         } catch (error) {
           fileError = String(error)
@@ -369,21 +407,28 @@ export const register: Register = on => {
       }
       const hookCommand = group === undefined || openHook === undefined ? undefined : await readHookCommand($, group, openHook.index)
       return Pane($.ui.resolve(e), {
-        dynamic, memory, servers, hooks, ui, now, home: home ?? '', cwd,
+        dynamic, memory, servers, hooks, settings, ui, now, home: home ?? '', cwd,
         placement: e.props.placement,
         ...(hookCommand === undefined ? {} : { hookCommand }),
         ...(fileText === undefined ? {} : { fileText }),
         ...(fileError === undefined ? {} : { fileError }),
       }, {
         onTab: view => pressTab($, view),
-        onSee: index => pressWrite($, async () => {
-          const file = (await readMemory($))[index]
-          if (file !== undefined) await openFile($, file.path)
+        onSee: path => pressWrite($, async () => {
+          if ((await readMemory($)).some(f => f.path === path)) await openFile($, path)
         }),
-        onObsidianFile: index => pressObsidianFile($, index),
+        onSeeSettings: path => pressWrite($, async () => {
+          if ((await readSettings($)).some(f => f.path === path)) await openFile($, path)
+        }),
+        onWarpFile: path => pressWarpFile($, path),
+        onFileWarp: () => pressWarpFile($),
+        onObsidianFile: path => pressObsidianFile($, path),
         onServer: id => pressWrite($, () => setServerId($, id)),
         onBack: () => pressWrite($, () => setServerId($, undefined)),
-        onFileBack: () => pressWrite($, () => setView($, 'claudemd')),
+        onFileBack: () => pressWrite($, async () => {
+          const [files, current] = await Promise.all([readMemory($), readUi($)])
+          await setView($, viewKind(current.filePath, files))
+        }),
         onRefresh: () => pressWrite($, () => refreshFile($)),
         onFileObsidian: () => pressFileObsidian($),
         onGroup: id => pressWrite($, () => toggleGroup($, id)),

@@ -1,14 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { Atom, EngineInterface } from 'claude-code'
-import type { Dynamic, HookGroup, Mascot, McpServer, MemoryFile, ModeState, Ui, View } from '../types'
+import type { Dynamic, HookGroup, Mascot, McpServer, MemoryFile, ModeState, SettingsFile, Ui, View } from '../types'
 
-// The seven `$.state` values of the mod. Bump a shape tag when that value's fields change.
+// The eight `$.state` values of the mod. Bump a shape tag when that value's fields change.
 // The engine's scan accepts `read`/`update` only on an atom declared as a const of the calling file, so every
 // state read and write lives here, beside the atoms, behind a helper.
 export const dynamic = atom({ plugin: 'code-hud', key: 'dynamic' } as const, {}, { shape: 'dynamic-1' })
 export const memory = atom({ plugin: 'code-hud', key: 'memory' } as const, [], { shape: 'memory-1' })
 export const servers = atom({ plugin: 'code-hud', key: 'servers' } as const, [], { shape: 'servers-1' })
 export const hooks = atom({ plugin: 'code-hud', key: 'hooks' } as const, [], { shape: 'hooks-1' })
+export const settings = atom({ plugin: 'code-hud', key: 'settings' } as const, [], { shape: 'settings-1' })
 export const mascot = atom({ plugin: 'code-hud', key: 'mascot' } as const, {}, { shape: 'mascot-1' })
 export const ui = atom({ plugin: 'code-hud', key: 'ui' } as const, { view: 'claudemd', openGroups: [] }, { shape: 'ui-1' })
 // The contract declares `Shaped<ModeState> | null`; `atom`'s shaped overload types its initial as ModeState alone,
@@ -47,6 +48,10 @@ export async function setServers($: EngineInterface, value: McpServer[]): Promis
 
 export async function setHooks($: EngineInterface, value: HookGroup[]): Promise<void> {
   if (!isSame(await read($, hooks), value)) await update($, hooks, () => value)
+}
+
+export async function setSettings($: EngineInterface, value: SettingsFile[]): Promise<void> {
+  if (!isSame(await read($, settings), value)) await update($, settings, () => value)
 }
 
 /** A mode a classic event reported. */
@@ -113,6 +118,10 @@ export async function readHooks($: EngineInterface): Promise<HookGroup[]> {
   return read($, hooks)
 }
 
+export async function readSettings($: EngineInterface): Promise<SettingsFile[]> {
+  return read($, settings)
+}
+
 export async function readDynamic($: EngineInterface): Promise<Dynamic> {
   return read($, dynamic)
 }
@@ -125,10 +134,12 @@ export async function readUi($: EngineInterface): Promise<Ui> {
   return read($, ui)
 }
 
-/** What the band's three buttons count; `hooks` is every row across the groups. */
-export async function readCounts($: EngineInterface): Promise<{ memory: number; servers: number; hooks: number }> {
-  const [files, list, groups] = await Promise.all([read($, memory), read($, servers), read($, hooks)])
-  return { memory: files.length, servers: list.length, hooks: groups.reduce((sum, group) => sum + group.rows.length, 0) }
+/** What the band's four buttons count; `hooks` is every row across the groups. */
+export async function readCounts($: EngineInterface): Promise<{ memory: number; servers: number; hooks: number; settings: number }> {
+  const [files, list, groups, found] = await Promise.all([read($, memory), read($, servers), read($, hooks), read($, settings)])
+  return {
+    memory: files.length, servers: list.length, hooks: groups.reduce((sum, group) => sum + group.rows.length, 0), settings: found.length,
+  }
 }
 
 export async function readMascot($: EngineInterface): Promise<Mascot> {

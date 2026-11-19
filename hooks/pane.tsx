@@ -1,6 +1,7 @@
 import type { Elements, RenderElement } from 'claude-code'
-import type { Dynamic, HookGroup, McpServer, MemoryFile, Ui, View } from '../types'
+import type { Dynamic, HookGroup, McpServer, MemoryFile, SettingsFile, SettingsLevel, Ui, View } from '../types'
 import { COLORS, formatPercent, formatResetClock, formatTokens, gaugeColor, shortPath } from './format'
+import { viewKind } from './settings'
 import { cardSvg, chipSvg, type ChipPart } from './svg'
 
 export type PaneData = {
@@ -8,6 +9,7 @@ export type PaneData = {
   memory: MemoryFile[]
   servers: McpServer[]
   hooks: HookGroup[]
+  settings: SettingsFile[]
   ui: Ui
   placement: string
   home: string
@@ -20,8 +22,11 @@ export type PaneData = {
 
 export type PaneHandlers = {
   onTab(view: View): void
-  onSee(index: number): void
-  onObsidianFile(index: number): void
+  onSee(path: string): void
+  onSeeSettings(path: string): void
+  onWarpFile(path: string): void
+  onFileWarp(): void
+  onObsidianFile(path: string): void
   onServer(id: string): void
   onBack(): void
   onFileBack(): void
@@ -52,6 +57,12 @@ const MEMORY_PILL: Record<string, { label: string; color: string }> = {
   Project: { label: 'Project', color: COLORS.green },
   Local: { label: 'Local', color: COLORS.green },
   AutoMem: { label: '自动记忆', color: COLORS.purple },
+}
+
+const SETTINGS_PILL: Record<SettingsLevel, { label: string; color: string }> = {
+  user: { label: '用户级', color: COLORS.blue },
+  project: { label: '项目级', color: COLORS.green },
+  local: { label: '项目级·本地', color: COLORS.green },
 }
 
 /** A display path cut in the middle with `…` past PATH_LIMIT characters, the file name kept. */
@@ -101,7 +112,7 @@ function resetOn(at: string | undefined, now: number): string | undefined {
 /** Pure tree builder: no `$`, no awaits. */
 export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHandlers): RenderElement {
   const { Box, Text, Button, Svg, Code, Markdown } = el
-  const { dynamic, memory, servers, hooks, ui } = data
+  const { dynamic, memory, servers, hooks, settings, ui } = data
   const hookCount = hooks.reduce((sum, group) => sum + group.rows.length, 0)
 
   const pill = (text: string, color: string): RenderElement => {
@@ -127,7 +138,7 @@ export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHand
   const list = (items: RenderElement[]): RenderElement => <Box flexDirection="column" rowGap="sm">{items}</Box>
   const hidden = (n: number): RenderElement[] => (n > 0 ? [dim(`另有 ${n} 项未显示`)] : [])
 
-  // ---- widget: the context gauge and the three counts ----
+  // ---- widget: the context gauge and the four counts ----
   if (data.placement === 'widget') {
     const parts: ChipPart[] = [
       { ring: dynamic.contextPercent },
@@ -137,7 +148,7 @@ export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHand
     const { source, width, height } = chipSvg(parts, COLORS.gray)
     return row([
       <Svg source={source} width={width} height={height} alt={`上下文 ${formatPercent(dynamic.contextPercent)}`} />,
-      <Text color={COLORS.gray}>{`CLAUDE.md ${memory.length} · MCP ${servers.length} · hooks ${hookCount}`}</Text>,
+      <Text color={COLORS.gray}>{`CLAUDE.md ${memory.length} · MCP ${servers.length} · hooks ${hookCount} · settings.json ${settings.length}`}</Text>,
     ])
   }
 
@@ -145,12 +156,17 @@ export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHand
   if (ui.view === 'file') {
     const shown = displayPath(ui.filePath ?? '', data.home, data.cwd)
     const text = sanitize(data.fileText ?? '')
+    const isSettings = viewKind(ui.filePath, memory) === 'settings'
+    const editor = isSettings ? 'Warp' : 'Obsidian'
     const body = data.fileText === undefined
       ? dim(`读不到这个文件：${shown}`)
       : text === ''
         ? dim('这个文件是空的')
         : <Box flexDirection="column" rowGap="sm">
-          {[<Markdown text={cutFile(text)} />, ...(text.length > FILE_LIMIT ? [dim('文件较长，其余部分请在 Obsidian 里查看')] : [])]}
+          {[
+            isSettings ? <Code source={cutFile(text)} language="json" /> : <Markdown text={cutFile(text)} />,
+            ...(text.length > FILE_LIMIT ? [dim(`文件较长，其余部分请在 ${editor} 里查看`)] : []),
+          ]}
         </Box>
     return (
       <Box flexDirection="column" rowGap="md">
@@ -159,7 +175,9 @@ export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHand
             action('back', () => handlers.onFileBack(), '返回'),
             action('refresh', () => handlers.onRefresh(), '刷新'),
             <Text mono>{shown}</Text>,
-            action('file-obsidian', () => handlers.onFileObsidian(), 'Obsidian'),
+            isSettings
+              ? action('file-warp', () => handlers.onFileWarp(), 'Warp')
+              : action('file-obsidian', () => handlers.onFileObsidian(), 'Obsidian'),
           ]),
           body,
         ]}
@@ -187,6 +205,7 @@ export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHand
     tab('claudemd', `CLAUDE.md ${memory.length}`),
     tab('mcp', `MCP ${servers.length}`),
     tab('hooks', `hooks ${hookCount}`),
+    tab('settings', `settings.json ${settings.length}`),
   ])
 
   // ---- CLAUDE.md ----
@@ -198,11 +217,29 @@ export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHand
         [pill(type.label, type.color), <Text mono>{displayPath(file.path, data.home, data.cwd)}</Text>],
         [
           dim(`${formatTokens(file.tokens)} tok`),
-          action(`see-${i}`, () => handlers.onSee(i), '查看'),
-          action(`obs-${i}`, () => handlers.onObsidianFile(i), 'Obsidian'),
+          // The row's path, not its index: a refresh between drawing and pressing must not shift the press to another file.
+          action(`see-${i}`, () => handlers.onSee(file.path), '查看'),
+          action(`obs-${i}`, () => handlers.onObsidianFile(file.path), 'Obsidian'),
         ],
       )
     }), ...hidden(memory.length - MEMORY_CAP)])
+  }
+
+  // ---- settings ----
+  const settingsView = (): RenderElement => {
+    if (settings.length === 0) return dim('没有找到 settings 文件')
+    return list(settings.map((file, i) => {
+      const level = SETTINGS_PILL[file.level]
+      return item(
+        // The user's file is always shown from HOME, whatever the session root.
+        [pill(level.label, level.color), <Text mono>{displayPath(file.path, data.home, file.level === 'user' ? '' : data.cwd)}</Text>],
+        [
+          // The row's path, not its index: a refresh between drawing and pressing must not shift the press to another file.
+          action(`set-see-${i}`, () => handlers.onSeeSettings(file.path), '查看'),
+          action(`set-warp-${i}`, () => handlers.onWarpFile(file.path), 'Warp'),
+        ],
+      )
+    }))
   }
 
   // ---- MCP ----
@@ -283,7 +320,7 @@ export function Pane(el: Elements['desktop'], data: PaneData, handlers: PaneHand
     return list([...groups, ...hidden(cut), dim(HOOKS_NOTE)])
   }
 
-  const body = view === 'mcp' ? mcpView() : view === 'hooks' ? hooksView() : memoryView()
+  const body = view === 'mcp' ? mcpView() : view === 'hooks' ? hooksView() : view === 'settings' ? settingsView() : memoryView()
   const top = cards.length === 0 ? [] : [row(cards)]
   return <Box flexDirection="column" rowGap="md">{[...top, tabs, body]}</Box>
 }

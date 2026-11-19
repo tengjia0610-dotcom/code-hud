@@ -9,9 +9,9 @@ export type Segment = 'reset' | 'mascot' | 'model' | 'usage' | 'launch' | 'mode'
 /** What goes first when a row does not fit. `counts` and `context` are never dropped. */
 export const DROP_ORDER: Segment[] = ['reset', 'mascot', 'model', 'usage', 'launch', 'mode', 'project']
 
-/** Estimated width of each segment, in character cells (row 1: 92, row 2: 60). */
+/** Estimated width of each segment, in character cells (row 1: 92, row 2: 76). */
 export const SEGMENT_WIDTH: Record<Segment, number> = {
-  model: 14, project: 28, context: 12, usage: 10, reset: 12, mode: 12, counts: 40, launch: 20, mascot: 4,
+  model: 14, project: 28, context: 12, usage: 10, reset: 12, mode: 12, counts: 56, launch: 20, mascot: 4,
 }
 
 /** The two rows as the band lays them out: status segments and the mascot, then counts and launch. */
@@ -31,7 +31,7 @@ export function visibleSegments(columns: number): Set<Segment> {
 export type BandData = {
   dynamic: Dynamic
   mode: ModeState | null
-  counts: { memory: number; servers: number; hooks: number }
+  counts: { memory: number; servers: number; hooks: number; settings: number }
   pose: Pose
   columns: number
   now: number
@@ -116,6 +116,7 @@ export function Band(el: Elements['desktop'], data: BandData, handlers: BandHand
       action('band-claudemd', 'primary', () => handlers.onView('claudemd'), `CLAUDE.md ${counts.memory}`),
       action('band-mcp', 'primary', () => handlers.onView('mcp'), `MCP ${counts.servers}`),
       action('band-hooks', 'primary', () => handlers.onView('hooks'), `hooks ${counts.hooks}`),
+      action('band-settings', 'primary', () => handlers.onView('settings'), `settings.json ${counts.settings}`),
     ]))
   }
 
